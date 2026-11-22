@@ -1,5 +1,13 @@
+# Ambiente Python e arquivos gerados
 .venv/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Configurações locais de editor e ferramentas
+.vscode/
+.claude/
+.agents/
+
+# Segredos do Streamlit, se um dia existirem
 .streamlit/secrets.toml

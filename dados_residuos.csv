@@ -1,13 +1,13 @@
-bairro,populacao_bairro,domicilios,estabelecimentos_comerciais,pontos_coleta,residuos_reciclaveis_ton_mes
-Jardim Aurora,2200,694,21,1,2.97
-Vila Esperança,3600,1122,34,2,5.0
-Parque dos Ipês,4900,1568,47,2,7.21
-Residencial Pantanal,6300,1935,58,3,9.32
-Vila Nova Serra,7800,2418,73,3,11.24
-Jardim das Araras,9100,2854,89,4,12.86
-Centro Norte,10800,3388,102,4,15.19
-Bairro do Lago,12500,3891,111,6,18.34
-Parque Bodoquena,14600,4578,135,6,21.1
-Vila Maracaju,16700,5234,164,7,24.26
-Jardim Taquari,18900,5854,177,7,27.84
-Setor Pioneiros,21000,6521,198,9,29.81
+populacao_bairro,domicilios,comercio_local,taxa_adesao_historica,volume_reciclavel_ton
+3200,950,12,0.35,3.1
+8500,2600,45,0.5,9.8
+12000,3800,90,0.65,16.5
+4500,1400,20,0.4,4.8
+15000,4700,110,0.7,21.2
+6000,1900,35,0.45,6.9
+9200,2900,60,0.55,11.4
+21000,6800,160,0.75,29.8
+5300,1650,25,0.38,5.4
+11000,3500,80,0.6,14.7
+18000,5800,140,0.72,25.1
+7400,2300,50,0.48,8.6

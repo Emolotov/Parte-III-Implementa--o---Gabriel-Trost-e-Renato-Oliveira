@@ -1,17 +1,27 @@
-"""Treina e valida o modelo preditivo do RotaVerde MS.
+"""Treinamento e validação do modelo do RotaVerde MS.
 
-Compara modelos candidatos por validação Leave-One-Out (LOO) e seleciona o de
-menor MAE. Salva o pacote completo (modelo vencedor, candidatos ajustados,
-previsões LOO, faixas de treino e metadados de integridade) em
-`modelo_residuos.pkl`.
+Este arquivo responde a uma pergunta simples: dado o perfil de um bairro, quantas
+toneladas de recicláveis ele deve gerar por mês?
 
-Uso:
+Nossa base tem só 12 bairros, e isso pede cuidado na hora de avaliar o modelo. Se
+separarmos 25% para teste, sobram apenas 3 bairros para medir o desempenho, e o
+resultado muda muito dependendo de quais 3 caem no sorteio. Por isso o script faz
+três coisas:
+
+  1. mostra o quanto essa avaliação "de sorteio" oscila, testando 40 sementes;
+  2. compara os modelos com Leave-One-Out: cada bairro é previsto por um modelo
+     que aprendeu só com os outros 11, e repetimos isso para todos os 12;
+  3. salva o modelo que errou menos em modelo_residuos.pkl.
+
+Um detalhe sobre as variáveis: população e número de domicílios andam praticamente
+juntas (correlação de 0,999), porque cada casa tem em média 3,2 pessoas. Usar as
+duas seria contar a mesma informação duas vezes. Por isso transformamos domicílios
+em "pessoas por domicílio", que traz algo novo para o modelo.
+
+Para rodar:
     python modelo.py
 """
-
-import hashlib
 from pathlib import Path
-from typing import Any
 
 import joblib
 import pandas as pd
@@ -20,63 +30,50 @@ from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.model_selection import LeaveOneOut, cross_val_predict
+from sklearn.model_selection import LeaveOneOut, cross_val_predict, train_test_split
 
+# Os caminhos partem da pasta deste arquivo, e não da pasta de onde o comando foi
+# executado. Assim o projeto funciona mesmo se alguém rodar de outro lugar.
 PASTA = Path(__file__).resolve().parent
 ARQUIVO_DADOS = PASTA / "dados_residuos.csv"
 ARQUIVO_MODELO = PASTA / "modelo_residuos.pkl"
 
-ALVO = "residuos_reciclaveis_ton_mes"
+# O que queremos prever: toneladas de recicláveis por mês em cada bairro.
+ALVO = "volume_reciclavel_ton"
+
+# As informações que o modelo pode usar para fazer a previsão.
 FEATURES = [
     "populacao_bairro",
     "pessoas_por_domicilio",
-    "estabelecimentos_comerciais",
-    "pontos_coleta",
+    "comercio_local",
+    "taxa_adesao_historica",
 ]
+
+# Semente fixa para que o RandomForest dê sempre o mesmo resultado.
 SEMENTE = 42
-
-CHAVES_OBRIGATORIAS = {
-    "modelo",
-    "modelos",
-    "nome_modelo",
-    "features",
-    "faixa_treino",
-    "validacao",
-    "previsoes_loo",
-    "n_amostras",
-    "base_sintetica",
-    "versao_sklearn",
-    "extrapola",
-    "hash_dados",
-}
-
-
-def hash_arquivo(caminho: Path = ARQUIVO_DADOS) -> str:
-    """Retorna o SHA-256 hexadecimal do arquivo de dados."""
-    return hashlib.sha256(caminho.read_bytes()).hexdigest()
-
-
-def carregar_dados(caminho: Path = ARQUIVO_DADOS) -> pd.DataFrame:
-    df = pd.read_csv(caminho)
-    return adicionar_features(df)
 
 
 def adicionar_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Cria a coluna de pessoas por domicílio a partir das colunas originais."""
     df = df.copy()
-    if "domicilios" in df.columns:
-        if (df["domicilios"] <= 0).any():
-            raise ValueError("`domicilios` deve ser maior que zero.")
-        df["pessoas_por_domicilio"] = df["populacao_bairro"] / df["domicilios"]
+    df["pessoas_por_domicilio"] = df["populacao_bairro"] / df["domicilios"]
     return df
 
 
-def candidatos() -> dict[str, tuple[Any, list[str]]]:
-    """Modelos comparados. Cada item: (estimador, lista de features)."""
+def carregar_dados(caminho: Path = ARQUIVO_DADOS) -> pd.DataFrame:
+    """Lê o CSV dos bairros e já deixa a coluna derivada pronta."""
+    return adicionar_features(pd.read_csv(caminho))
+
+
+def candidatos() -> dict:
+    """Lista os modelos que vamos colocar para competir.
+
+    Cada item guarda o modelo e as colunas que ele enxerga. O baseline, que sempre
+    chuta a média, está aqui como régua: um modelo que não ganha dele não serve.
+    """
     return {
-        "RandomForest": (
-            RandomForestRegressor(n_estimators=200, random_state=SEMENTE),
-            FEATURES,
-        ),
+        "RandomForest (4 features)": (
+            RandomForestRegressor(n_estimators=50, random_state=SEMENTE), FEATURES),
         "Regressão linear (4 features)": (LinearRegression(), FEATURES),
         "Regressão linear (só população)": (LinearRegression(), ["populacao_bairro"]),
         "Baseline (prever a média)": (DummyRegressor(strategy="mean"), FEATURES),
@@ -84,214 +81,121 @@ def candidatos() -> dict[str, tuple[Any, list[str]]]:
 
 
 def validar(df: pd.DataFrame) -> pd.DataFrame:
-    """Validação Leave-One-Out: cada amostra é prevista por um modelo que não a viu."""
-    tabela, _ = _avaliar_loo(df)
-    return tabela
+    """Avalia todos os candidatos com Leave-One-Out.
+
+    Para cada modelo, prevemos cada bairro usando um modelo treinado sem ele. No
+    fim, comparamos as 12 previsões com os valores reais. A tabela sai ordenada do
+    menor para o maior erro médio (MAE, em toneladas).
+    """
+    y = df[ALVO]
+    linhas = []
+    for nome, (modelo, cols) in candidatos().items():
+        pred = cross_val_predict(modelo, df[cols], y, cv=LeaveOneOut())
+        linhas.append({
+            "modelo": nome,
+            "features": ", ".join(cols),
+            "mae_ton": mean_absolute_error(y, pred),
+            "r2": r2_score(y, pred),
+        })
+    return pd.DataFrame(linhas).sort_values("mae_ton").reset_index(drop=True)
 
 
-def _avaliar_loo(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Executa LOO para todos os candidatos e devolve (métricas, previsões por amostra)."""
-    y = df[ALVO].to_numpy()
-    linhas: list[dict[str, Any]] = []
-    previsoes = pd.DataFrame(
-        {
-            "bairro": df["bairro"].to_numpy(),
-            "populacao_bairro": df["populacao_bairro"].to_numpy(),
-            "real_ton": y,
-        }
-    )
-    for nome, (estimador, cols) in candidatos().items():
-        pred = cross_val_predict(estimador, df[cols], y, cv=LeaveOneOut())
-        linhas.append(
-            {
-                "modelo": nome,
-                "features": ", ".join(cols),
-                "mae_ton": float(mean_absolute_error(y, pred)),
-                "r2": float(r2_score(y, pred)),
-            }
-        )
-        if not nome.startswith("Baseline"):
-            previsoes[nome] = pred
-
-    tabela = pd.DataFrame(linhas).sort_values("mae_ton").reset_index(drop=True)
-    return tabela, previsoes
-
-
-def treinar(
-    df: pd.DataFrame | None = None,
-    caminho_dados: Path = ARQUIVO_DADOS,
-    caminho_modelo: Path = ARQUIVO_MODELO,
-) -> dict[str, Any]:
-    dados_df = carregar_dados(caminho_dados) if df is None else adicionar_features(df)
-    tabela, previsoes_loo = _avaliar_loo(dados_df)
-
-    elegiveis = tabela[~tabela["modelo"].str.startswith("Baseline")]
-    vencedor = str(elegiveis.iloc[0]["modelo"])
-
-    modelos_treinados: dict[str, dict[str, Any]] = {}
-    for nome, (estimador, cols) in candidatos().items():
-        if nome.startswith("Baseline"):
-            continue
-        estimador.fit(dados_df[cols], dados_df[ALVO])
-        modelos_treinados[nome] = {
-            "modelo": estimador,
-            "features": list(cols),
-            "extrapola": not isinstance(estimador, RandomForestRegressor),
-        }
-
-    faixa = {
-        col: (float(dados_df[col].min()), float(dados_df[col].max()))
-        for col in FEATURES + ["domicilios", ALVO]
-    }
-
-    vencedor_info = modelos_treinados[vencedor]
-    pacote: dict[str, Any] = {
-        "modelo": vencedor_info["modelo"],
-        "modelos": modelos_treinados,
-        "nome_modelo": vencedor,
-        "features": vencedor_info["features"],
-        "faixa_treino": faixa,
-        "validacao": tabela,
-        "previsoes_loo": previsoes_loo,
-        "n_amostras": int(len(dados_df)),
-        "base_sintetica": True,
-        "versao_sklearn": sklearn.__version__,
-        "extrapola": vencedor_info["extrapola"],
-        "hash_dados": hash_arquivo(caminho_dados) if caminho_dados.exists() else "",
-    }
-    joblib.dump(pacote, caminho_modelo)
-    return pacote
-
-
-def pacote_valido(
-    pacote: Any, caminho_dados: Path = ARQUIVO_DADOS
-) -> bool:
-    """Verifica se um pacote carregado corresponde ao ambiente e aos dados atuais."""
-    if not isinstance(pacote, dict):
-        return False
-    if not CHAVES_OBRIGATORIAS.issubset(pacote.keys()):
-        return False
-    if pacote.get("versao_sklearn") != sklearn.__version__:
-        return False
-    if caminho_dados.exists() and pacote.get("hash_dados") != hash_arquivo(caminho_dados):
-        return False
-    return True
-
-
-def carregar_ou_treinar(
-    caminho_modelo: Path = ARQUIVO_MODELO,
-    caminho_dados: Path = ARQUIVO_DADOS,
-) -> dict[str, Any]:
-    """Carrega o pacote salvo ou retreina se ausente, corrompido ou desatualizado."""
-    if caminho_modelo.exists():
-        try:
-            pacote = joblib.load(caminho_modelo)
-            if pacote_valido(pacote, caminho_dados):
-                return pacote
-        except Exception:
-            pass
-    return treinar(caminho_dados=caminho_dados, caminho_modelo=caminho_modelo)
-
-
-def _info_modelo(pacote: dict[str, Any], nome_modelo: str | None = None) -> dict[str, Any]:
-    if nome_modelo is not None and "modelos" in pacote and nome_modelo in pacote["modelos"]:
-        return pacote["modelos"][nome_modelo]
-    return {
-        "modelo": pacote["modelo"],
-        "features": pacote["features"],
-        "extrapola": pacote["extrapola"],
-    }
-
-
-def features_fora_da_faixa(
-    pacote: dict[str, Any],
-    entrada: dict[str, float],
-    nome_modelo: str | None = None,
-) -> list[tuple[str, float, float, float]]:
-    """Lista `(feature, valor, min_treino, max_treino)` fora da faixa vista no treino."""
-    info = _info_modelo(pacote, nome_modelo)
-    linha = pd.DataFrame([entrada])
-    if "pessoas_por_domicilio" in info["features"] and "pessoas_por_domicilio" not in linha:
-        linha = adicionar_features(linha)
-
-    fora: list[tuple[str, float, float, float]] = []
-    for col in info["features"]:
-        vmin, vmax = pacote["faixa_treino"][col]
-        val = float(linha[col].iloc[0])
-        if val < vmin or val > vmax:
-            fora.append((col, val, vmin, vmax))
-    return fora
-
-
-def prever(
-    pacote: dict[str, Any],
-    entrada: dict[str, float],
-    nome_modelo: str | None = None,
-) -> float:
-    """Prevê toneladas/mês de recicláveis (limitado a >= 0,0)."""
-    info = _info_modelo(pacote, nome_modelo)
-    cols = info["features"]
-    linha = pd.DataFrame([entrada])
-    if "pessoas_por_domicilio" in cols and "pessoas_por_domicilio" not in linha:
-        linha = adicionar_features(linha)
-
-    for col in ("populacao_bairro", "estabelecimentos_comerciais", "pontos_coleta"):
-        if col in cols and float(linha[col].iloc[0]) < 0:
-            raise ValueError(f"`{col}` não pode ser negativo.")
-
-    bruto = float(info["modelo"].predict(linha[cols])[0])
-    return max(0.0, bruto)
+# As colunas que a primeira versão do projeto usava, com domicílios direto.
+FEATURES_VERSAO_ANTIGA = ["populacao_bairro", "domicilios", "comercio_local",
+                          "taxa_adesao_historica"]
 
 
 def estabilidade_divisao_unica(df: pd.DataFrame, n_sementes: int = 40) -> pd.DataFrame:
-    """Mostra quanto o R² de uma divisão única 75/25 varia com a semente sorteada."""
-    from sklearn.model_selection import train_test_split
+    """Refaz a avaliação da primeira versão, mudando apenas o sorteio.
 
+    Mesmo modelo, mesmas colunas e mesma divisão 75/25 de antes. A única coisa que
+    muda é a semente que decide quais bairros vão para o teste. Serve para mostrar
+    por que um único R² não era confiável com tão poucos dados.
+    """
     res = []
     for s in range(n_sementes):
         tr, te = train_test_split(df, test_size=0.25, random_state=s)
-        m = RandomForestRegressor(n_estimators=200, random_state=SEMENTE)
-        m.fit(tr[FEATURES], tr[ALVO])
-        p = m.predict(te[FEATURES])
-        res.append(
-            {
-                "semente": s,
-                "r2": float(r2_score(te[ALVO], p)),
-                "mae_ton": float(mean_absolute_error(te[ALVO], p)),
-            }
-        )
+        m = RandomForestRegressor(n_estimators=50, random_state=SEMENTE)
+        m.fit(tr[FEATURES_VERSAO_ANTIGA], tr[ALVO])
+        p = m.predict(te[FEATURES_VERSAO_ANTIGA])
+        res.append({"semente": s, "r2": r2_score(te[ALVO], p),
+                    "mae_ton": mean_absolute_error(te[ALVO], p)})
     return pd.DataFrame(res)
+
+
+def treinar(df: pd.DataFrame | None = None) -> dict:
+    """Escolhe o melhor modelo, treina com todos os bairros e salva em disco.
+
+    Além do modelo, o arquivo salvo leva o que o painel precisa saber sobre ele:
+    quais colunas usa, entre quais valores foi treinado e como se saiu na validação.
+    """
+    df = carregar_dados() if df is None else df
+    tabela = validar(df)
+
+    # O baseline fica de fora da escolha: ele só existe para comparação.
+    elegiveis = tabela[~tabela["modelo"].str.startswith("Baseline")]
+    vencedor = elegiveis.iloc[0]["modelo"]
+    modelo, cols = candidatos()[vencedor]
+
+    # Na validação, cada modelo via 11 bairros. O modelo final aprende com os 12.
+    modelo.fit(df[cols], df[ALVO])
+
+    pacote = {
+        "modelo": modelo,
+        "nome_modelo": vencedor,
+        "features": cols,
+        # O menor e o maior valor de cada coluna no treino. O painel usa isso para
+        # avisar quando alguém pede uma previsão fora do que o modelo conhece.
+        "faixa_treino": {c: (float(df[c].min()), float(df[c].max()))
+                         for c in FEATURES + ["domicilios", ALVO]},
+        # Guardamos a tabela como lista de dicionários, e não como DataFrame, para
+        # que o arquivo abra em qualquer versão do pandas.
+        "validacao": tabela.to_dict("records"),
+        "n_amostras": len(df),
+        # A regressão linear consegue prolongar a tendência para bairros maiores.
+        # O RandomForest não: acima do maior bairro do treino, ele trava.
+        "extrapola": not isinstance(modelo, RandomForestRegressor),
+        # Se o painel rodar com outro scikit-learn, ele usa isto para saber que
+        # precisa treinar de novo.
+        "versao_sklearn": sklearn.__version__,
+    }
+    joblib.dump(pacote, ARQUIVO_MODELO)
+    return pacote
+
+
+def prever(pacote: dict, entradas: pd.DataFrame) -> pd.Series:
+    """Estima o volume de recicláveis para um ou mais bairros.
+
+    Recebe as colunas do jeito que estão no CSV. Se faltar a coluna de pessoas por
+    domicílio, ela é calculada aqui.
+    """
+    if "pessoas_por_domicilio" not in entradas:
+        entradas = adicionar_features(entradas)
+    return pd.Series(pacote["modelo"].predict(entradas[pacote["features"]]),
+                     index=entradas.index)
 
 
 if __name__ == "__main__":
     dados = carregar_dados()
-    print(f"Base: {ARQUIVO_DADOS.name} — {len(dados)} amostras (SINTÉTICA)\n")
+    print(f"Base: {ARQUIVO_DADOS.name} — {len(dados)} amostras\n")
 
-    corr = float(dados[["populacao_bairro", "domicilios"]].corr().iloc[0, 1])
-    print(
-        f"Correlação populacao_bairro x domicilios: {corr:.5f} "
-        "-> domicilios fica fora das features\n"
-    )
+    # Primeiro, mostramos por que domicílios não entra direto no modelo.
+    corr = dados["populacao_bairro"].corr(dados["domicilios"])
+    print(f"Correlação populacao_bairro x domicilios: {corr:.5f} "
+          "-> domicilios entra só como pessoas_por_domicilio\n")
 
+    # Depois, o quanto a avaliação antiga dependia da sorte.
     instab = estabilidade_divisao_unica(dados)
-    print("Divisão única 75/25 em 40 sementes (por que NÃO usamos):")
-    print(
-        f"  R²  min {instab.r2.min():.3f} | mediana {instab.r2.median():.3f} | "
-        f"max {instab.r2.max():.3f} | negativos: {(instab.r2 < 0).sum()}"
-    )
-    print(
-        f"  MAE min {instab.mae_ton.min():.2f} | mediana {instab.mae_ton.median():.2f} | "
-        f"max {instab.mae_ton.max():.2f} ton\n"
-    )
+    print("Avaliação antiga (divisão única 75/25) em 40 sementes:")
+    print(f"  R²  min {instab.r2.min():.3f} | mediana {instab.r2.median():.3f} | "
+          f"max {instab.r2.max():.3f} | negativos: {(instab.r2 < 0).sum()}")
+    print(f"  MAE min {instab.mae_ton.min():.2f} | mediana {instab.mae_ton.median():.2f} "
+          f"| max {instab.mae_ton.max():.2f} ton\n")
 
+    # Por fim, a comparação justa entre os modelos e o salvamento do vencedor.
     pacote = treinar(dados)
-    print(f"Validação Leave-One-Out ({len(dados)} previsões fora da amostra):")
-    print(
-        pacote["validacao"][["modelo", "mae_ton", "r2"]].to_string(
-            index=False, float_format=lambda v: f"{v:.3f}"
-        )
-    )
-    print(
-        f"\nModelo salvo: {pacote['nome_modelo']} -> {ARQUIVO_MODELO.name} "
-        f"(scikit-learn {pacote['versao_sklearn']})"
-    )
+    print("Validação Leave-One-Out (12 previsões fora da amostra):")
+    print(pd.DataFrame(pacote["validacao"])[["modelo", "mae_ton", "r2"]].to_string(
+        index=False, float_format=lambda v: f"{v:.3f}"))
+    print(f"\nModelo salvo: {pacote['nome_modelo']} -> {ARQUIVO_MODELO.name} "
+          f"(scikit-learn {pacote['versao_sklearn']})")

@@ -1,58 +1,76 @@
-# RotaVerde MS — Previsão de resíduos recicláveis por bairro
+# RotaVerde MS — Previsão de Coleta Seletiva
 
-Protótipo que estima quantas toneladas de recicláveis por mês um bairro gera, a partir de população, domicílios, estabelecimentos comerciais e pontos de coleta. Inclui um painel em Streamlit com simulador interativo e comparação de modelos.
+**Disciplina:** Inteligência Artificial (2026.2) — UFMS Câmpus Coxim  
+**Autores:** Gabriel Lemos Trost & Renato Oliveira Alexandre  
+**Proposta:** Aplicação de IA para previsão de resíduos recicláveis e roteamento prioritário para prefeituras e cooperativas de Mato Grosso do Sul.
 
-> **Atenção: a base de dados é sintética.** `dados_residuos.csv` tem **12 bairros fictícios** gerados por `gerar_dados.py` (semente fixa). Os números não são medições reais. Servem para demonstrar o fluxo do modelo, não para planejar coleta.
+> **Sobre os dados:** `dados_residuos.csv` é uma **base sintética com 12 bairros**, construída para demonstrar o fluxo da solução. Os valores não são medições reais de coleta. Os indicadores dos bairros do ranking (Centro, Vila Bela, Flávio Garcia, Senhor Divino, Silviolândia) também são ilustrativos.
 
-## Estrutura
+---
 
-| Arquivo | Função |
-|---|---|
-| `gerar_dados.py` | Gera a base sintética `dados_residuos.csv` (reprodutível) |
-| `dados_residuos.csv` | 12 bairros fictícios |
-| `modelo.py` | Valida os modelos com Leave-One-Out, escolhe o de menor erro e salva `modelo_residuos.pkl` |
-| `app.py` | Painel Streamlit: dados, simulador, validação e premissas |
-| `.streamlit/config.toml` | Tema claro/escuro do painel |
-| `test_rotaverde.py` | Testes automatizados de dados, modelo e interface (`AppTest`) |
-| `requirements.txt` | Versões exatas das bibliotecas |
+## Estrutura dos Arquivos
+- `dados_residuos.csv`: base sintética com população, domicílios, comércio local, taxa de adesão e volume reciclável por bairro.
+- `modelo.py`: compara RandomForest, regressão linear e um baseline com validação Leave-One-Out e salva o modelo de menor erro.
+- `modelo_residuos.pkl`: modelo treinado, com a tabela de validação e a faixa de valores vista no treino.
+- `app.py`: interface web em Streamlit com ranking de bairros, simulador, validação e premissas.
+- `requirements.txt`: dependências; o scikit-learn fica em versão exata porque o `.pkl` é salvo com ela.
 
-## Como rodar
+---
 
-```powershell
-python -m venv .venv
-.venv\Scripts\activate        # em alguns Pythons a pasta é .venv\bin
+## Como Executar
+
+Requer **Python 3.11 ou superior** (testado no 3.11 e no 3.14).
+
+1. Instalar as dependências:
+```bash
 pip install -r requirements.txt
-python modelo.py              # treina, valida e salva o modelo
+```
+
+2. Executar o treinamento do modelo (opcional, modelo já incluso):
+```bash
+python modelo.py
+```
+
+3. Iniciar a interface web:
+```bash
 streamlit run app.py
 ```
 
-Para rodar os testes:
+O app pode ser iniciado de qualquer pasta. Se o `.pkl` não existir ou tiver sido salvo com outra versão do scikit-learn, o app retreina o modelo sozinho.
 
-```powershell
-python -m unittest -v test_rotaverde.py
-```
-
-O `app.py` funciona a partir de qualquer pasta: todos os caminhos partem de `Path(__file__).parent`. Se o `.pkl` não existir, estiver corrompido, tiver sido salvo com outra versão do scikit-learn ou se `dados_residuos.csv` tiver mudado, o app retreina o modelo automaticamente.
+---
 
 ## Metodologia
 
-**Validação.** Com 12 amostras, uma divisão treino/teste de 75/25 deixa só 3 bairros no teste e o R² passa a depender da semente sorteada. `python modelo.py` mostra essa variação em 40 sementes. Por isso a avaliação usa **Leave-One-Out**: cada bairro é previsto por um modelo treinado nos outros 11.
+**Validação.** Com 12 bairros, uma divisão treino/teste de 75/25 deixa só 3 amostras de teste. Variando apenas a semente dessa divisão, o R² do RandomForest oscila de valores negativos a quase 1 (`python modelo.py` mostra a faixa). Por isso a avaliação usa **Leave-One-Out**: cada bairro é previsto por um modelo treinado nos outros 11.
 
-**Comparação de modelos.** São comparados, nas mesmas condições:
+**Comparação de modelos (Leave-One-Out):**
 
-- RandomForest (4 features)
-- Regressão linear (4 features)
-- Regressão linear (só população)
-- Baseline que prevê a média
+| Modelo | MAE (ton/mês) | R² |
+|---|---|---|
+| Regressão linear (só população) | 0,42 | 0,996 |
+| Regressão linear (4 features) | 0,54 | 0,993 |
+| RandomForest (4 features) | 2,04 | 0,883 |
+| Baseline (prever a média) | 7,59 | −0,190 |
 
-Fica como padrão o modelo de menor MAE. Nesta base, que é quase linear, a regressão linear vence o RandomForest. O RandomForest aproxima a tendência por degraus e não extrapola fora da faixa vista no treino.
+Testamos RandomForest e regressão linear, e o modelo simples venceu nesta base. Todas as variáveis têm correlação acima de 0,97 com o volume, então a relação é praticamente uma reta. O RandomForest aproxima uma reta por degraus e não prevê fora da faixa vista no treino.
 
-**Features.** `domicilios` tem correlação de cerca de 0,9999 com `populacao_bairro`. Por isso não entra direto: usamos a derivada `pessoas_por_domicilio`. Isso evita uma importância de variáveis dividida ao acaso entre duas colunas redundantes.
+**Variáveis.** `domicilios` tem correlação de 0,9997 com `populacao_bairro`. Usada direto, a importância se dividiria ao acaso entre as duas. Ela entra apenas como `pessoas_por_domicilio`.
 
-**Simulador.** Usa por padrão o modelo vencedor (só população, exibindo apenas os campos realmente usados por ele) e permite alternar entre os candidatos validados. A população fica travada na faixa do treino até o usuário habilitar a extrapolação; qualquer variável fora da faixa treinada gera alerta, e previsões físicas são limitadas a valores não negativos (`>= 0`).
+**Simulador.** A população fica limitada à faixa do treino (3.200 a 21.000 habitantes). Para testar bairros maiores, é preciso ligar a extrapolação, e o painel avisa que o resultado é uma estimativa sem dados que a confirmem.
 
-## Premissas e limitações
+---
 
-- **Fator de aterro evitado = 0,85** é uma *premissa sem fonte citada*. O painel deixa ajustar o valor na aba *Premissas* e atualiza o simulador automaticamente. Substitua por um dado com referência antes de apresentar o resultado.
-- Dados agregados por bairro e estáticos: não há série temporal por ponto de coleta.
-- Fora do escopo deste código: clusterização (KMeans), detecção de anomalias (IsolationForest), classificação de prioridade e validação temporal (TimeSeriesSplit). São **roadmap**, condicionados a ter dados reais por ponto de coleta ao longo do tempo.
+## Premissas e Limitações
+
+- **Aterro evitado = volume × 0,85.** O fator 0,85 é uma *premissa sem fonte citada* e pode ser ajustado na aba Premissas do painel.
+- Os dados são agregados por bairro e estáticos: não há série temporal por ponto de coleta.
+
+## Escopo Atual e Roadmap
+
+Este código é a **prova de conceito da frente 1** (previsão de volume por bairro e ranking de prioridade). As frentes abaixo fazem parte da proposta, mas **ainda não estão implementadas** e dependem de dados reais por ponto de coleta ao longo do tempo:
+
+- clusterização de pontos de coleta (KMeans);
+- detecção de anomalias no volume coletado (IsolationForest);
+- classificação de prioridade de rotas;
+- validação temporal (TimeSeriesSplit).
