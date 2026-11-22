@@ -1,0 +1,8 @@
+# Versões exatas: o modelo_residuos.pkl é serializado com este scikit-learn.
+# Testado com CPython 3.14 (python.org / py launcher) no Windows.
+scikit-learn==1.9.1
+numpy==2.5.5
+pandas==3.1.1
+joblib==1.6.0
+streamlit==1.67.0
+altair==6.3.0
